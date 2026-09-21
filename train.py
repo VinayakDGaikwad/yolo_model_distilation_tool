@@ -65,9 +65,9 @@ from typing import Dict, List, Tuple, Optional
 # Constants
 # ---------------------------------------------------------------------------
 SUPPORTED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-DEFAULT_DATA_DIR = "tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025"
-DEFAULT_MODEL = "best_07-25_122104/best.pt"
-DEFAULT_DATASET_ROOT = "./datasets/yolo_finetune_dataset"
+DEFAULT_DATA_DIR = "/home/trendzlink/yolo_model_distilation_tool/only_boxes_with_lower_confidance_dataset/tz_batch_test_03_9_2025"
+DEFAULT_MODEL = "/home/trendzlink/yolo_model_distilation_tool/best.pt"
+DEFAULT_DATASET_ROOT = "/home/trendzlink/yolo_model_distilation_tool/only_boxes_with_lower_confidance_dataset/tz_batch_test_03_9_2025"
 
 # Ultralytics defaults for augment (shown in --help); actual defaults come
 # from ultralytics/cfg/default.yaml if you DON'T pass the flag.

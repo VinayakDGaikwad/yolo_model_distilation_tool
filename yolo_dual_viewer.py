@@ -5,8 +5,8 @@ YOLO Dual Model Viewer & Annotator - PyQt5 GUI
 Features:
 - Load 2 YOLO models (ultralytics YOLO .pt/.onnx)
 - Browse image folder, navigate images (Prev/Next, slider, list)
-- Per-model confidence slider (0.05 - 0.95) + MaxDet spinbox (1..1000, default 300+)
-- Per-model NMS IoU slider
+- Per-model confidence interval [low, high] (0.01–0.95) — two sliders/spins BETWEEN two values instead of single threshold, both ways slider↔spin synced (0.01 granularity, auto-clamp low≤high)
+- Per-model NMS IoU slider + MaxDet spinbox (1..2000, default 400, supports >300)
 - Run inference, overlay boxes with colors per model
 - Filter/sort boxes, toggle visibility per source
 - Draw new boxes (click-drag), assign class, move/delete boxes
@@ -502,7 +502,7 @@ class AnnotView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YOLO Dual Model Viewer - Multi-box Annotator (Conf Slider | MaxDet >300 | Draw | YOLO Export)")
+        self.setWindowTitle("YOLO Dual Model Viewer - Multi-box Annotator (Conf Interval [low,high] | MaxDet >300 | Draw | YOLO Export)")
         # --- Responsive window sizing: fit available screen, avoid out-of-screen ---
         # Use 92% of available geometry, centered, with sensible minimum
         try:
@@ -655,20 +655,49 @@ class MainWindow(QMainWindow):
         hA2.addWidget(self.chk_showA)
         hA2.addWidget(self.lbl_statusA, 1)
         vA.addLayout(hA2)
-        # conf slider A
+        # conf range A — between two values (low–high) instead of single threshold, both ways slider↔spin
         hA3 = QHBoxLayout()
-        hA3.addWidget(QLabel("Conf:"))
+        hA3.addWidget(QLabel("Conf low:"))
         self.slider_confA = QSlider(Qt.Horizontal)
         self.slider_confA.setRange(1, 95)
         self.slider_confA.setValue(25)
+        self.slider_confA.setTickPosition(QSlider.TicksBelow)
+        self.slider_confA.setTickInterval(10)
+        self.slider_confA.setSingleStep(1)
+        self.slider_confA.setPageStep(5)
+        self.slider_confA.setToolTip("Confidence LOW (0.01–0.95) — lower bound of interval; synced both ways with spinbox")
         self.spin_confA = QDoubleSpinBox()
         self.spin_confA.setRange(0.01, 0.95)
-        self.spin_confA.setSingleStep(0.05)
+        self.spin_confA.setDecimals(2)
+        self.spin_confA.setSingleStep(0.01)
+        self.spin_confA.setKeyboardTracking(False)
         self.spin_confA.setValue(0.25)
-        self.spin_confA.setFixedWidth(65)
+        self.spin_confA.setFixedWidth(68)
+        self.spin_confA.setToolTip("Confidence LOW — lower bound (0.01–0.95)")
         hA3.addWidget(self.slider_confA, 1)
         hA3.addWidget(self.spin_confA)
         vA.addLayout(hA3)
+        hA3h = QHBoxLayout()
+        hA3h.addWidget(QLabel("Conf high:"))
+        self.slider_conf_highA = QSlider(Qt.Horizontal)
+        self.slider_conf_highA.setRange(1, 95)
+        self.slider_conf_highA.setValue(95)
+        self.slider_conf_highA.setTickPosition(QSlider.TicksBelow)
+        self.slider_conf_highA.setTickInterval(10)
+        self.slider_conf_highA.setSingleStep(1)
+        self.slider_conf_highA.setPageStep(5)
+        self.slider_conf_highA.setToolTip("Confidence HIGH (0.01–0.95) — upper bound of interval; must be ≥ low")
+        self.spin_conf_highA = QDoubleSpinBox()
+        self.spin_conf_highA.setRange(0.01, 0.95)
+        self.spin_conf_highA.setDecimals(2)
+        self.spin_conf_highA.setSingleStep(0.01)
+        self.spin_conf_highA.setKeyboardTracking(False)
+        self.spin_conf_highA.setValue(0.95)
+        self.spin_conf_highA.setFixedWidth(68)
+        self.spin_conf_highA.setToolTip("Confidence HIGH — upper bound")
+        hA3h.addWidget(self.slider_conf_highA, 1)
+        hA3h.addWidget(self.spin_conf_highA)
+        vA.addLayout(hA3h)
         # IoU + MaxDet
         hA4 = QHBoxLayout()
         hA4.addWidget(QLabel("IoU:"))
@@ -725,18 +754,47 @@ class MainWindow(QMainWindow):
         hB2.addWidget(self.lbl_statusB, 1)
         vB.addLayout(hB2)
         hB3 = QHBoxLayout()
-        hB3.addWidget(QLabel("Conf:"))
+        hB3.addWidget(QLabel("Conf low:"))
         self.slider_confB = QSlider(Qt.Horizontal)
         self.slider_confB.setRange(1, 95)
         self.slider_confB.setValue(25)
+        self.slider_confB.setTickPosition(QSlider.TicksBelow)
+        self.slider_confB.setTickInterval(10)
+        self.slider_confB.setSingleStep(1)
+        self.slider_confB.setPageStep(5)
+        self.slider_confB.setToolTip("Confidence LOW (0.01–0.95) — lower bound of interval; synced both ways")
         self.spin_confB = QDoubleSpinBox()
         self.spin_confB.setRange(0.01, 0.95)
-        self.spin_confB.setSingleStep(0.05)
+        self.spin_confB.setDecimals(2)
+        self.spin_confB.setSingleStep(0.01)
+        self.spin_confB.setKeyboardTracking(False)
         self.spin_confB.setValue(0.25)
-        self.spin_confB.setFixedWidth(65)
+        self.spin_confB.setFixedWidth(68)
+        self.spin_confB.setToolTip("Confidence LOW — lower bound")
         hB3.addWidget(self.slider_confB, 1)
         hB3.addWidget(self.spin_confB)
         vB.addLayout(hB3)
+        hB3h = QHBoxLayout()
+        hB3h.addWidget(QLabel("Conf high:"))
+        self.slider_conf_highB = QSlider(Qt.Horizontal)
+        self.slider_conf_highB.setRange(1, 95)
+        self.slider_conf_highB.setValue(95)
+        self.slider_conf_highB.setTickPosition(QSlider.TicksBelow)
+        self.slider_conf_highB.setTickInterval(10)
+        self.slider_conf_highB.setSingleStep(1)
+        self.slider_conf_highB.setPageStep(5)
+        self.slider_conf_highB.setToolTip("Confidence HIGH (0.01–0.95) — upper bound of interval; must be ≥ low")
+        self.spin_conf_highB = QDoubleSpinBox()
+        self.spin_conf_highB.setRange(0.01, 0.95)
+        self.spin_conf_highB.setDecimals(2)
+        self.spin_conf_highB.setSingleStep(0.01)
+        self.spin_conf_highB.setKeyboardTracking(False)
+        self.spin_conf_highB.setValue(0.95)
+        self.spin_conf_highB.setFixedWidth(68)
+        self.spin_conf_highB.setToolTip("Confidence HIGH — upper bound")
+        hB3h.addWidget(self.slider_conf_highB, 1)
+        hB3h.addWidget(self.spin_conf_highB)
+        vB.addLayout(hB3h)
         hB4 = QHBoxLayout()
         hB4.addWidget(QLabel("IoU:"))
         self.spin_iouB = QDoubleSpinBox()
@@ -1238,11 +1296,15 @@ class MainWindow(QMainWindow):
         # model edits -> update label?
         self.modelA_edit.textChanged.connect(lambda: self._update_load_btn_state())
         self.modelB_edit.textChanged.connect(lambda: self._update_load_btn_state())
-        # sliders sync
+        # sliders sync — confidence interval [low, high] both ways (slider ↔ spin for each bound)
         self.slider_confA.valueChanged.connect(self._on_confA_slider)
         self.spin_confA.valueChanged.connect(self._on_confA_spin)
+        self.slider_conf_highA.valueChanged.connect(self._on_conf_highA_slider)
+        self.spin_conf_highA.valueChanged.connect(self._on_conf_highA_spin)
         self.slider_confB.valueChanged.connect(self._on_confB_slider)
         self.spin_confB.valueChanged.connect(self._on_confB_spin)
+        self.slider_conf_highB.valueChanged.connect(self._on_conf_highB_slider)
+        self.spin_conf_highB.valueChanged.connect(self._on_conf_highB_spin)
         # iou / max det -> rerun auto with debounce
         self.spin_iouA.valueChanged.connect(self._schedule_rerun)
         self.spin_iouB.valueChanged.connect(self._schedule_rerun)
@@ -1559,32 +1621,193 @@ class MainWindow(QMainWindow):
         if val != self.current_idx:
             self.show_image(val)
 
+    # ----- confidence interval [low, high] — both ways (slider ↔ spin for each bound) -----
+    # low/high are inclusive; low ≤ high is enforced by auto-bumping the opposite bound
     def _on_confA_slider(self, val: int):
-        # map 1..95 -> 0.01..0.95
-        v = val / 100.0
+        v = round(val / 100.0, 2)
+        high = self.spin_conf_highA.value()
+        # enforce low ≤ high: if low pushed above high, raise high to match
+        if v > high:
+            self.spin_conf_highA.blockSignals(True)
+            self.slider_conf_highA.blockSignals(True)
+            self.spin_conf_highA.setValue(v)
+            self.slider_conf_highA.setValue(val)
+            self.spin_conf_highA.blockSignals(False)
+            self.slider_conf_highA.blockSignals(False)
+        if abs(self.spin_confA.value() - v) < 1e-9:
+            # still need rerun if we bumped high
+            if v > high:
+                self._schedule_rerun()
+            return
         self.spin_confA.blockSignals(True)
         self.spin_confA.setValue(v)
         self.spin_confA.blockSignals(False)
         self._schedule_rerun()
 
     def _on_confA_spin(self, val: float):
+        ival = int(round(val * 100))
+        ival = max(self.slider_confA.minimum(), min(self.slider_confA.maximum(), ival))
+        v = round(ival / 100.0, 2)
+        # enforce low ≤ high
+        if v > self.spin_conf_highA.value():
+            self.spin_conf_highA.blockSignals(True)
+            self.slider_conf_highA.blockSignals(True)
+            self.spin_conf_highA.setValue(v)
+            self.slider_conf_highA.setValue(ival)
+            self.spin_conf_highA.blockSignals(False)
+            self.slider_conf_highA.blockSignals(False)
+        if self.slider_confA.value() == ival and abs(self.spin_confA.value() - v) < 1e-9:
+            # if high was bumped, still need rerun
+            if v > self.spin_conf_highA.value() - 1e-9:  # already handled
+                pass
+            return
         self.slider_confA.blockSignals(True)
-        self.slider_confA.setValue(int(val*100))
+        self.slider_confA.setValue(ival)
         self.slider_confA.blockSignals(False)
+        # spin already at v (Qt may have rounded); ensure spin reflects clamped ival
+        if abs(self.spin_confA.value() - v) > 1e-9:
+            self.spin_confA.blockSignals(True)
+            self.spin_confA.setValue(v)
+            self.spin_confA.blockSignals(False)
+        self._schedule_rerun()
+
+    def _on_conf_highA_slider(self, val: int):
+        v = round(val / 100.0, 2)
+        low = self.spin_confA.value()
+        if v < low:
+            self.spin_confA.blockSignals(True)
+            self.slider_confA.blockSignals(True)
+            self.spin_confA.setValue(v)
+            self.slider_confA.setValue(val)
+            self.spin_confA.blockSignals(False)
+            self.slider_confA.blockSignals(False)
+        if abs(self.spin_conf_highA.value() - v) < 1e-9:
+            if v < low:
+                self._schedule_rerun()
+            return
+        self.spin_conf_highA.blockSignals(True)
+        self.spin_conf_highA.setValue(v)
+        self.spin_conf_highA.blockSignals(False)
+        self._schedule_rerun()
+
+    def _on_conf_highA_spin(self, val: float):
+        ival = int(round(val * 100))
+        ival = max(self.slider_conf_highA.minimum(), min(self.slider_conf_highA.maximum(), ival))
+        v = round(ival / 100.0, 2)
+        if v < self.spin_confA.value():
+            self.spin_confA.blockSignals(True)
+            self.slider_confA.blockSignals(True)
+            self.spin_confA.setValue(v)
+            self.slider_confA.setValue(ival)
+            self.spin_confA.blockSignals(False)
+            self.slider_confA.blockSignals(False)
+        if self.slider_conf_highA.value() == ival and abs(self.spin_conf_highA.value() - v) < 1e-9:
+            return
+        self.slider_conf_highA.blockSignals(True)
+        self.slider_conf_highA.setValue(ival)
+        self.slider_conf_highA.blockSignals(False)
+        if abs(self.spin_conf_highA.value() - v) > 1e-9:
+            self.spin_conf_highA.blockSignals(True)
+            self.spin_conf_highA.setValue(v)
+            self.spin_conf_highA.blockSignals(False)
         self._schedule_rerun()
 
     def _on_confB_slider(self, val: int):
-        v = val / 100.0
+        v = round(val / 100.0, 2)
+        high = self.spin_conf_highB.value()
+        if v > high:
+            self.spin_conf_highB.blockSignals(True)
+            self.slider_conf_highB.blockSignals(True)
+            self.spin_conf_highB.setValue(v)
+            self.slider_conf_highB.setValue(val)
+            self.spin_conf_highB.blockSignals(False)
+            self.slider_conf_highB.blockSignals(False)
+        if abs(self.spin_confB.value() - v) < 1e-9:
+            if v > high:
+                self._schedule_rerun()
+            return
         self.spin_confB.blockSignals(True)
         self.spin_confB.setValue(v)
         self.spin_confB.blockSignals(False)
         self._schedule_rerun()
 
     def _on_confB_spin(self, val: float):
+        ival = int(round(val * 100))
+        ival = max(self.slider_confB.minimum(), min(self.slider_confB.maximum(), ival))
+        v = round(ival / 100.0, 2)
+        if v > self.spin_conf_highB.value():
+            self.spin_conf_highB.blockSignals(True)
+            self.slider_conf_highB.blockSignals(True)
+            self.spin_conf_highB.setValue(v)
+            self.slider_conf_highB.setValue(ival)
+            self.spin_conf_highB.blockSignals(False)
+            self.slider_conf_highB.blockSignals(False)
+        if self.slider_confB.value() == ival and abs(self.spin_confB.value() - v) < 1e-9:
+            return
         self.slider_confB.blockSignals(True)
-        self.slider_confB.setValue(int(val*100))
+        self.slider_confB.setValue(ival)
         self.slider_confB.blockSignals(False)
+        if abs(self.spin_confB.value() - v) > 1e-9:
+            self.spin_confB.blockSignals(True)
+            self.spin_confB.setValue(v)
+            self.spin_confB.blockSignals(False)
         self._schedule_rerun()
+
+    def _on_conf_highB_slider(self, val: int):
+        v = round(val / 100.0, 2)
+        low = self.spin_confB.value()
+        if v < low:
+            self.spin_confB.blockSignals(True)
+            self.slider_confB.blockSignals(True)
+            self.spin_confB.setValue(v)
+            self.slider_confB.setValue(val)
+            self.spin_confB.blockSignals(False)
+            self.slider_confB.blockSignals(False)
+        if abs(self.spin_conf_highB.value() - v) < 1e-9:
+            if v < low:
+                self._schedule_rerun()
+            return
+        self.spin_conf_highB.blockSignals(True)
+        self.spin_conf_highB.setValue(v)
+        self.spin_conf_highB.blockSignals(False)
+        self._schedule_rerun()
+
+    def _on_conf_highB_spin(self, val: float):
+        ival = int(round(val * 100))
+        ival = max(self.slider_conf_highB.minimum(), min(self.slider_conf_highB.maximum(), ival))
+        v = round(ival / 100.0, 2)
+        if v < self.spin_confB.value():
+            self.spin_confB.blockSignals(True)
+            self.slider_confB.blockSignals(True)
+            self.spin_confB.setValue(v)
+            self.slider_confB.setValue(ival)
+            self.spin_confB.blockSignals(False)
+            self.slider_confB.blockSignals(False)
+        if self.slider_conf_highB.value() == ival and abs(self.spin_conf_highB.value() - v) < 1e-9:
+            return
+        self.slider_conf_highB.blockSignals(True)
+        self.slider_conf_highB.setValue(ival)
+        self.slider_conf_highB.blockSignals(False)
+        if abs(self.spin_conf_highB.value() - v) > 1e-9:
+            self.spin_conf_highB.blockSignals(True)
+            self.spin_conf_highB.setValue(v)
+            self.spin_conf_highB.blockSignals(False)
+        self._schedule_rerun()
+
+    def get_conf_rangeA(self):
+        """Return (low, high) for Model A, low ≤ high, both in [0.01,0.95]."""
+        lo = float(self.spin_confA.value())
+        hi = float(self.spin_conf_highA.value())
+        if lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
+    def get_conf_rangeB(self):
+        lo = float(self.spin_confB.value())
+        hi = float(self.spin_conf_highB.value())
+        if lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
 
     def _schedule_rerun(self):
         self.rerun_timer.start()
@@ -1613,14 +1836,17 @@ class MainWindow(QMainWindow):
         # Alternative: clear all preds explicitly
 
         counts = {"A": 0, "B": 0}
-        # Model A
+        # Model A — confidence interval [low, high] instead of single threshold
         if self.wrapperA.model is not None and self.chk_showA.isChecked():
-            conf = self.spin_confA.value()
+            low, high = self.get_conf_rangeA()
             iou = self.spin_iouA.value()
             maxd = self.spin_maxA.value()
-            # log
-            self.log(f"Infer A: conf={conf:.2f} iou={iou:.2f} max_det={maxd} on {os.path.basename(self.current_image_path)}")
-            boxes = self.wrapperA.predict(self.current_image_path, conf=conf, iou=iou, max_det=maxd)
+            self.log(f"Infer A: conf=[{low:.2f},{high:.2f}] iou={iou:.2f} max_det={maxd} on {os.path.basename(self.current_image_path)}")
+            # predict with low as threshold, then filter to interval
+            boxes = self.wrapperA.predict(self.current_image_path, conf=low, iou=iou, max_det=maxd)
+            # interval filter: keep boxes where low ≤ conf ≤ high
+            if high < 0.99:  # if high is <1, filter upper bound
+                boxes = [b for b in boxes if low - 1e-9 <= b.conf <= high + 1e-9]
             # tag source
             for b in boxes:
                 b.source = "modelA"
@@ -1635,13 +1861,15 @@ class MainWindow(QMainWindow):
             self.last_boxes_A = []
             if self.wrapperA.model is None and self.modelA_edit.text().strip():
                 self.log("Model A not loaded - skipping inference")
-        # Model B
+        # Model B — interval
         if self.wrapperB.model is not None and self.chk_showB.isChecked():
-            conf = self.spin_confB.value()
+            low, high = self.get_conf_rangeB()
             iou = self.spin_iouB.value()
             maxd = self.spin_maxB.value()
-            self.log(f"Infer B: conf={conf:.2f} iou={iou:.2f} max_det={maxd} on {os.path.basename(self.current_image_path)}")
-            boxes = self.wrapperB.predict(self.current_image_path, conf=conf, iou=iou, max_det=maxd)
+            self.log(f"Infer B: conf=[{low:.2f},{high:.2f}] iou={iou:.2f} max_det={maxd} on {os.path.basename(self.current_image_path)}")
+            boxes = self.wrapperB.predict(self.current_image_path, conf=low, iou=iou, max_det=maxd)
+            if high < 0.99:
+                boxes = [b for b in boxes if low - 1e-9 <= b.conf <= high + 1e-9]
             for b in boxes:
                 b.source = "modelB"
                 if not b.label:
@@ -2430,11 +2658,14 @@ class MainWindow(QMainWindow):
             showA = showB = showM = True
 
         boxes: List[Box] = []
-        # Model A headless
+        # Model A headless — interval [low, high]
         if self.wrapperA.model is not None and (mode not in ("Manual only", "Model B only", "Model B + Manual") and include_preds):
             if not respect_vis or showA:
                 if "Model B only" not in mode and "Model B +" not in mode:  # not B-only
-                    preds = self.wrapperA.predict(img_path, conf=self.spin_confA.value(), iou=self.spin_iouA.value(), max_det=self.spin_maxA.value())
+                    lowA, highA = self.get_conf_rangeA()
+                    preds = self.wrapperA.predict(img_path, conf=lowA, iou=self.spin_iouA.value(), max_det=self.spin_maxA.value())
+                    if highA < 0.99:
+                        preds = [b for b in preds if lowA - 1e-9 <= b.conf <= highA + 1e-9]
                     for b in preds:
                         b.source = "modelA"
                         if not b.label:
@@ -2446,7 +2677,10 @@ class MainWindow(QMainWindow):
         if self.wrapperB.model is not None and (mode not in ("Manual only", "Model A only", "Model A + Manual") and include_preds):
             if not respect_vis or showB:
                 if "Model A only" not in mode and "Model A +" not in mode:
-                    preds = self.wrapperB.predict(img_path, conf=self.spin_confB.value(), iou=self.spin_iouB.value(), max_det=self.spin_maxB.value())
+                    lowB, highB = self.get_conf_rangeB()
+                    preds = self.wrapperB.predict(img_path, conf=lowB, iou=self.spin_iouB.value(), max_det=self.spin_maxB.value())
+                    if highB < 0.99:
+                        preds = [b for b in preds if lowB - 1e-9 <= b.conf <= highB + 1e-9]
                     for b in preds:
                         b.source = "modelB"
                         if not b.label:

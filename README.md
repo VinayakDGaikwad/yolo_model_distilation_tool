@@ -6,7 +6,10 @@ PyQt5 GUI to compare **two YOLO models** on same images, tune confidence / `max_
 
 ## Features
 - Load **Model A + Model B** (`.pt` / `.onnx` via `ultralytics.YOLO`). Either can be empty → manual-only mode.
+- Load every `.pt`, `.onnx`, or `.engine` file from a **Model Folder** and combine their detections in one view. The legacy Model A/B controls remain available when no folder is selected.
 - **Per-model controls**: Confidence slider (0.01–0.95, synced QSlider + QDoubleSpinBox), IoU (NMS), **MaxDet 1–2000 (default 400, supports >300)**.
+- Folder mode uses one **Universal conf** slider for all loaded models.
+- **Live multi-model overlap control**: Overlap A/B slider suppresses the lower-confidence same-class box when any two folder models overlap; set to 0% to disable.
 - **Show/Hide** per source with distinct colors (green = A, blue = B, red = manual).
 - Image folder browser (jpg/png/bmp/tiff/webp), `Prev/Next`, list + slider navigation.
 - **Interactive canvas** (QGraphicsView/Scene):
@@ -34,9 +37,13 @@ System check:
 
 ## Run
 ```bash
+# From a checkout (works without installing the package)
+python -m yolo_viewer
+
 # via venv (recommended, has ultralytics)
  /home/trendzlink/venv/envision/bin/python yolo_dual_viewer.py
- /home/trendzlink/venv/envision/bin/python yolo_dual_viewer.py --modelA /home/trendzlink/Downloads/best_07-25_122104/best.pt --images /home/trendzlink/Downloads/tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025 --modelB /path/to/second.pt
+ /home/trendzlink/venv/envision/bin/python yolo_dual_viewer.py --models-dir /path/to/model_folder --images /path/to/images
+ /home/trendzlink/venv/envision/bin/python yolo_dual_viewer.py --modelA /path/to/best.pt --images /path/to/images --modelB /path/to/second.pt
 
 # via system (manual-only if ultralytics missing)
  python3 yolo_dual_viewer.py
@@ -71,7 +78,15 @@ Image `1280x720` box `100,200,300,400` → `0 0.156250 0.416667 0.156250 0.27777
 ## File Structure
 ```
 yolo_tool/
-  yolo_dual_viewer.py   # main GUI (1600x980, single file)
+  yolo_dual_viewer.py   # backwards-compatible launcher (python yolo_dual_viewer.py)
+  yolo_viewer/
+    __init__.py         # public package exports
+    __main__.py         # python -m yolo_viewer entrypoint
+    app.py              # package entrypoint (parse_args + main)
+    models.py           # Box and YoloWrapper, independent of Qt
+    constants.py        # shared constants (colors, image extensions)
+    graphics.py         # BoxItem / AnnotScene / AnnotView view classes
+    main_window.py      # MainWindow GUI
   requirements.txt
   README.md
   run.sh
@@ -91,5 +106,5 @@ yolo_tool/
 - PyQt5 vs PyQt6 → code imports `PyQt5`; if only PyQt6 present, `pip install PyQt5`.
 
 ## License / Author
-Muse Spark — single-file tool, no external GUI builder. Modify `SOURCE_COLORS`, default sliders, or `SUPPORTED_IMG_EXTS` as needed.
+Muse Spark — PyQt5 desktop tool. Modify `SOURCE_COLORS`, default sliders, or `SUPPORTED_IMG_EXTS` as needed.
 # yolo_model_distilation_tool

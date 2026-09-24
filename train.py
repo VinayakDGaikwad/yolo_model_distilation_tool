@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-YOLO Fine-Tuning Script — further train a .pt on YOLO txt labels
------------------------------------------------------------------
-Takes a YOLO detection .pt (e.g. best_07-25_122104/best.pt) and a folder
-containing images + co-located `<image>.txt` YOLO labels (as exported by
-yolo_dual_viewer.py) and fine-tunes / continues training.
+YOLO Training Script — trains YOLOv8-L from scratch on YOLO txt labels
+----------------------------------------------------------------------
+By default this script builds a YOLOv8-L (yolov8l) architecture from its
+YAML config with RANDOMLY INITIALIZED weights and trains it from scratch
+on a folder containing images + co-located `<image>.txt` YOLO labels
+(as exported by yolo_dual_viewer.py).
+
+Pass a .pt checkpoint via --model instead if you want to fine-tune /
+continue training an existing model (pretrained weights are then used).
 
 Features:
 - Auto-prepares a proper YOLO dataset structure:
@@ -15,12 +19,13 @@ Features:
   from a flat folder where images and txts are co-located (handles spaces,
   parentheses in filenames).
 
-- Auto-detects nc / class names from the .pt (fallback: scan labels for max class id).
+- Auto-detects nc / class names from the .pt (fine-tune mode). When training
+  from scratch (yaml model), nc / class names are scanned from the labels.
 
 - Exposes ALL common Ultralytics training + augmentation knobs as CLI args
   so you can later pass any augmentation overrides, e.g.:
 
-      python train.py --model best_07-25_122104/best.pt \
+      python train.py --model yolov8l.yaml \
           --data-dir tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025 \
           --epochs 50 --imgsz 640 --batch 8 \
           --hsv-h 0.015 --hsv-s 0.7 --hsv-v 0.4 \
@@ -34,24 +39,30 @@ Features:
 Ultralytics version tested: 8.x (ultralytics>=8.0). Requires torch + ultralytics.
 
 Examples:
-    # 1. Minimal fine-tune — auto-prepare dataset, 80/20 split, defaults:
-    python train.py --model best_07-25_122104/best.pt
+    # 1. Train YOLOv8-L FROM SCRATCH (default) — auto-prepare dataset, 80/20 split:
+    python train.py
 
-    # 2. Plot 6 random train samples with GT boxes before training (sanity check):
-    python train.py --model best_07-25_122104/best.pt --plot --plot-n 6
+    # 2. Same, explicitly + longer schedule (scratch training likes more epochs):
+    python train.py --model yolov8l.yaml --epochs 300
+
+    # 3. Plot 6 random train samples with GT boxes before training (sanity check):
+    python train.py --plot --plot-n 6
     # only plot, no training:
     python train.py --plot-only --plot-n 9 --plot-split train --plot-save ./preview.png
 
-    # 3. Custom data dir + explicit augment overrides (what you asked for):
-    python train.py --model best_07-25_122104/best.pt \\
+    # 4. Custom data dir + explicit augment overrides:
+    python train.py --model yolov8l.yaml \\
         --data-dir tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025 \\
-        --dataset-root ./datasets/my_run --val-split 0.2 --epochs 100 \\
+        --dataset-root ./datasets/my_run --val-split 0.2 --epochs 300 \\
         --hsv-h 0.02 --hsv-s 0.5 --degrees 15 --mosaic 0.8 --erasing 0.4 --plot
 
-    # 4. Just prepare dataset, inspect, don't train:
+    # 5. Just prepare dataset, inspect, don't train:
     python train.py --dry-run --data-dir tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025
 
-    # 5. Re-use an already prepared dataset.yaml (skip auto-prepare):
+    # 6. Re-use an already prepared dataset.yaml (skip auto-prepare):
+    python train.py --data-yaml ./datasets/my_run/dataset.yaml --epochs 100
+
+    # 7. Fine-tune an existing checkpoint instead of training from scratch:
     python train.py --model best_07-25_122104/best.pt --data-yaml ./datasets/my_run/dataset.yaml --epochs 50
 """
 import argparse
@@ -66,8 +77,28 @@ from typing import Dict, List, Tuple, Optional
 # ---------------------------------------------------------------------------
 SUPPORTED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 DEFAULT_DATA_DIR = "/home/trendzlink/yolo_model_distilation_tool/only_boxes_with_lower_confidance_dataset/tz_batch_test_03_9_2025"
-DEFAULT_MODEL = "/home/trendzlink/yolo_model_distilation_tool/best.pt"
+# yolov8l.yaml = YOLOv8-L architecture, random init -> trains FROM SCRATCH.
+# (nc/names come from the dataset, not from the model yaml.)
+DEFAULT_MODEL = "yolov8l.yaml"
 DEFAULT_DATASET_ROOT = "/home/trendzlink/yolo_model_distilation_tool/only_boxes_with_lower_confidance_dataset/tz_batch_test_03_9_2025"
+
+
+def is_scratch_model(spec: str) -> bool:
+    """
+    True if `spec` names an architecture config (random init / from scratch)
+    rather than a .pt/.pth checkpoint with trained weights.
+
+    Examples (True):  yolov8l.yaml, yolov8.yaml, yolo11l.yaml, yolov8l
+    Examples (False): best.pt, runs/train/exp/weights/best.pt, /path/to/weights.pt
+    """
+    s = str(spec).strip()
+    if s.lower().endswith((".yaml", ".yml")):
+        return True
+    p = Path(s)
+    if p.exists():
+        return False
+    # bare model names like "yolov8l" (no dir, no suffix) resolve to an ultralytics cfg yaml
+    return p.suffix == "" and "/" not in s and "\\" not in s
 
 # Ultralytics defaults for augment (shown in --help); actual defaults come
 # from ultralytics/cfg/default.yaml if you DON'T pass the flag.
@@ -739,7 +770,7 @@ def plot_yolo_samples_matplotlib(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="YOLO fine-tuning: further train a .pt on YOLO txt labels (with full augmentation control + matplotlib preview)",
+        description="YOLO training: train YOLOv8-L from scratch (default) or fine-tune a .pt on YOLO txt labels (with full augmentation control + matplotlib preview)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog=(
             "Augmentation overrides examples:\n"
@@ -759,7 +790,8 @@ def build_parser() -> argparse.ArgumentParser:
     # --- Data / Model ---
     g_data = p.add_argument_group("Data / Model")
     g_data.add_argument("--model", type=str, default=DEFAULT_MODEL,
-                        help="Path to .pt to further train (e.g. best_07-25_122104/best.pt). Can be yolov8n.pt / yolo11n.pt etc.")
+                        help="Model to train. Default 'yolov8l.yaml' = YOLOv8-L trained FROM SCRATCH (random weights). "
+                             "Pass a .pt (e.g. best.pt / yolov8l.pt) to fine-tune instead.")
     g_data.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
                         help="Flat folder containing images + paired .txt YOLO labels (spaces in names OK). Ignored if --data-yaml is given and --no-prepare.")
     g_data.add_argument("--data-yaml", type=str, default=None,
@@ -958,9 +990,10 @@ def main():
     args = parser.parse_args()
 
     print("=" * 78)
-    print(" YOLO Fine-Tune — further train .pt on YOLO txt labels")
+    print(" YOLO Train — yolov8l from scratch (pass a .pt to fine-tune instead)")
     print("=" * 78)
     print(f"  Model      : {args.model}")
+    print(f"  Mode       : {'FROM SCRATCH (random init, architecture from yaml)' if is_scratch_model(args.model) else 'fine-tune / continue from checkpoint'}")
     print(f"  Data dir   : {args.data_dir}")
     print(f"  DatasetRoot: {args.dataset_root}")
     print(f"  Data YAML  : {args.data_yaml if args.data_yaml else '(auto-generated)'}")
@@ -968,12 +1001,15 @@ def main():
 
     # ---- checks ----
     model_path = Path(args.model)
-    if not model_path.exists():
+    from_scratch = is_scratch_model(args.model)
+    if not from_scratch and not model_path.exists():
         print(f"[ERROR] Model not found: {model_path} (cwd={Path.cwd()})")
         alt = Path(DEFAULT_MODEL)
         if alt.exists():
             print(f"        Hint: default model exists at {alt.resolve()}")
         sys.exit(2)
+    if from_scratch:
+        print(f"[INFO] Training FROM SCRATCH: {args.model} (random init, no pretrained weights)")
 
     data_yaml_path: Optional[Path] = None
     if args.data_yaml:
@@ -992,7 +1028,12 @@ def main():
         try:
             data_dir = Path(args.data_dir)
             dataset_root = Path(args.dataset_root)
-            nc, names = get_model_info(str(model_path))
+            if from_scratch:
+                # A yaml-built model has no trained class names (defaults to nc=80),
+                # so derive nc/names from the labels instead.
+                nc, names = -1, []
+            else:
+                nc, names = get_model_info(str(model_path))
             if nc < 0:
                 imgs = find_images(data_dir)
                 _, _, max_c = scan_and_validate_labels(imgs)
@@ -1051,7 +1092,7 @@ def main():
     if args.check_only:
         print("[INFO] --check-only: dataset and model validated, exiting.")
         print(f"       dataset yaml = {data_yaml_path}")
-        print(f"       model        = {model_path.resolve()}")
+        print(f"       model        = {args.model}{' (from scratch)' if from_scratch else ''}")
         sys.exit(0)
 
     if data_yaml_path is None or not data_yaml_path.exists():
@@ -1122,7 +1163,7 @@ def main():
         rect=args.rect,
         amp=args.amp,
         optimizer=args.optimizer,
-        pretrained=True,
+        pretrained=not from_scratch,
         verbose=args.verbose,
         seed=args.seed,
         deterministic=args.deterministic,
@@ -1179,7 +1220,7 @@ def main():
 
     print()
     print(f"  Dataset YAML : {data_yaml_path}")
-    print(f"  Model        : {model_path.resolve()}")
+    print(f"  Model        : {args.model}{' (from scratch, random init)' if from_scratch else f' -> {model_path.resolve()}'}")
     print("=" * 78)
 
     if args.dry_run:
@@ -1198,7 +1239,9 @@ def main():
         sys.exit(4)
 
     print()
-    print(f"[INFO] Loading model: {model_path}")
+    print(f"[INFO] Loading model: {args.model}"
+          + ("  (architecture only — weights randomly initialized, training FROM SCRATCH)"
+             if from_scratch else ""))
     model = YOLO(str(model_path))
 
     print(f"[INFO] Starting training for {args.epochs} epochs (imgsz={args.imgsz}, batch={args.batch}) ...")

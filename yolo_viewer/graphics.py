@@ -3,7 +3,7 @@
 from typing import List, Optional, Tuple
 
 from PyQt5.QtWidgets import (
-    QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
+    QGraphicsEllipseItem, QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
     QGraphicsTextItem, QGraphicsView, QMenu,
 )
 from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
@@ -147,7 +147,8 @@ class AnnotScene(QGraphicsScene):
         self.draw_mode = False
         self.drawing = False
         self.draw_start: QPointF = QPointF()
-        self.temp_rect: Optional[QGraphicsRectItem] = None
+        self.circle_diameter = 50.0
+        self.temp_rect: Optional[QGraphicsEllipseItem] = None
         self.box_items: List[BoxItem] = []
         self._pixmap: Optional[QPixmap] = None
 
@@ -169,6 +170,15 @@ class AnnotScene(QGraphicsScene):
         if enabled:
             # make existing boxes not movable while drawing? keep selectable
             pass
+
+    def set_circle_diameter(self, diameter: int):
+        self.circle_diameter = max(5.0, float(diameter))
+
+    def _fixed_circle_rect(self, center: QPointF) -> QRectF:
+        radius = min(self.circle_diameter / 2.0, self.img_w / 2.0, self.img_h / 2.0)
+        center_x = max(radius, min(center.x(), self.img_w - radius))
+        center_y = max(radius, min(center.y(), self.img_h - radius))
+        return QRectF(center_x - radius, center_y - radius, radius * 2.0, radius * 2.0)
 
     def add_box_item(self, box: Box) -> BoxItem:
         item = BoxItem(box, self.img_w, self.img_h)
@@ -204,11 +214,12 @@ class AnnotScene(QGraphicsScene):
             pos.setX(max(0, min(pos.x(), self.img_w)))
             pos.setY(max(0, min(pos.y(), self.img_h)))
             self.drawing = True
-            self.draw_start = pos
+            circle_rect = self._fixed_circle_rect(pos)
+            self.draw_start = circle_rect.center()
             if self.temp_rect:
                 self.removeItem(self.temp_rect)
                 self.temp_rect = None
-            self.temp_rect = QGraphicsRectItem(QRectF(pos, pos))
+            self.temp_rect = QGraphicsEllipseItem(circle_rect)
             pen = QPen(SOURCE_COLORS["manual"], 2, Qt.DashLine)
             pen.setCosmetic(True)
             self.temp_rect.setPen(pen)
@@ -227,11 +238,6 @@ class AnnotScene(QGraphicsScene):
 
     def mouseMoveEvent(self, event):
         if self.drawing and self.draw_mode and self.temp_rect:
-            pos = event.scenePos()
-            pos.setX(max(0, min(pos.x(), self.img_w)))
-            pos.setY(max(0, min(pos.y(), self.img_h)))
-            rect = QRectF(self.draw_start, pos).normalized()
-            self.temp_rect.setRect(rect)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -241,7 +247,7 @@ class AnnotScene(QGraphicsScene):
             pos = event.scenePos()
             pos.setX(max(0, min(pos.x(), self.img_w)))
             pos.setY(max(0, min(pos.y(), self.img_h)))
-            rect = QRectF(self.draw_start, pos).normalized()
+            rect = self._fixed_circle_rect(self.draw_start)
             self.removeItem(self.temp_rect)
             self.temp_rect = None
             self.drawing = False

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-YOLO Training Script — trains YOLOv8-L from scratch on YOLO txt labels
+YOLO Training Script — fine-tunes a PRETRAINED YOLOv8-L by default on YOLO txt labels
 ----------------------------------------------------------------------
-By default this script builds a YOLOv8-L (yolov8l) architecture from its
-YAML config with RANDOMLY INITIALIZED weights and trains it from scratch
-on a folder containing images + co-located `<image>.txt` YOLO labels
-(as exported by yolo_dual_viewer.py).
+By default this script loads a pretrained YOLOv8-L checkpoint (yolov8l.pt,
+COCO-pretrained weights, downloaded automatically by Ultralytics on first
+use) and fine-tunes it on a folder containing images + co-located
+`<image>.txt` YOLO labels (as exported by yolo_dual_viewer.py).
 
-Pass a .pt checkpoint via --model instead if you want to fine-tune /
-continue training an existing model (pretrained weights are then used).
+Pass a `.yaml` architecture config via --model instead (e.g. yolov8l.yaml)
+if you explicitly want to train FROM SCRATCH with randomly initialized
+weights. You can also pass a different .pt checkpoint (your own or another
+Ultralytics one) to fine-tune / continue training from that.
 
 Features:
 - Auto-prepares a proper YOLO dataset structure:
@@ -25,8 +27,8 @@ Features:
 - Exposes ALL common Ultralytics training + augmentation knobs as CLI args
   so you can later pass any augmentation overrides, e.g.:
 
-      python train.py --model yolov8l.yaml \
-          --data-dir tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025 \
+      python train.py --model yolov8l.pt \
+          --data-dir ./my_images \
           --epochs 50 --imgsz 640 --batch 8 \
           --hsv-h 0.015 --hsv-s 0.7 --hsv-v 0.4 \
           --degrees 10 --translate 0.1 --scale 0.5 --shear 2.0 \
@@ -39,11 +41,11 @@ Features:
 Ultralytics version tested: 8.x (ultralytics>=8.0). Requires torch + ultralytics.
 
 Examples:
-    # 1. Train YOLOv8-L FROM SCRATCH (default) — auto-prepare dataset, 80/20 split:
+    # 1. Fine-tune YOLOv8-L from COCO-pretrained weights (default) — auto-prepare dataset, 80/20 split:
     python train.py
 
-    # 2. Same, explicitly + longer schedule (scratch training likes more epochs):
-    python train.py --model yolov8l.yaml --epochs 300
+    # 2. Same, explicitly + longer schedule:
+    python train.py --model yolov8l.pt --epochs 300
 
     # 3. Plot 6 random train samples with GT boxes before training (sanity check):
     python train.py --plot --plot-n 6
@@ -51,36 +53,57 @@ Examples:
     python train.py --plot-only --plot-n 9 --plot-split train --plot-save ./preview.png
 
     # 4. Custom data dir + explicit augment overrides:
-    python train.py --model yolov8l.yaml \\
-        --data-dir tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025 \\
+    python train.py --model yolov8l.pt \\
+        --data-dir ./my_images \\
         --dataset-root ./datasets/my_run --val-split 0.2 --epochs 300 \\
         --hsv-h 0.02 --hsv-s 0.5 --degrees 15 --mosaic 0.8 --erasing 0.4 --plot
 
     # 5. Just prepare dataset, inspect, don't train:
-    python train.py --dry-run --data-dir tz_batch_test_03_9_2025_020139/tz_batch_test_03_9_2025
+    python train.py --dry-run --data-dir ./my_images
 
     # 6. Re-use an already prepared dataset.yaml (skip auto-prepare):
     python train.py --data-yaml ./datasets/my_run/dataset.yaml --epochs 100
 
-    # 7. Fine-tune an existing checkpoint instead of training from scratch:
+    # 7. Fine-tune your own existing checkpoint instead of the stock pretrained one:
     python train.py --model best_07-25_122104/best.pt --data-yaml ./datasets/my_run/dataset.yaml --epochs 50
+
+    # 8. Train FROM SCRATCH (random init) instead of the pretrained default:
+    python train.py --model yolov8l.yaml --epochs 300
+
+    # 9. Launch graphical UI (tkinter) to pick paths and all training params:
+    python train.py --gui
 """
 import argparse
+import os
 import random
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+
+# Windows consoles often default to cp1252/"charmap", which breaks on UTF-8
+# output from Ultralytics / torch. Prefer UTF-8 with safe replacement.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 SUPPORTED_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-DEFAULT_DATA_DIR = "/home/trendzlink/yolo_model_distilation_tool/only_boxes_with_lower_confidance_dataset/tz_batch_test_03_9_2025"
-# yolov8l.yaml = YOLOv8-L architecture, random init -> trains FROM SCRATCH.
-# (nc/names come from the dataset, not from the model yaml.)
-DEFAULT_MODEL = "yolov8l.yaml"
-DEFAULT_DATASET_ROOT = "/home/trendzlink/yolo_model_distilation_tool/only_boxes_with_lower_confidance_dataset/tz_batch_test_03_9_2025"
+# Defaults are relative so the script is portable; override via CLI or GUI.
+DEFAULT_DATA_DIR = "."
+# yolov8l.pt = YOLOv8-L architecture with COCO-PRETRAINED weights -> fine-tunes
+# by default. Ultralytics downloads this automatically on first use if it's
+# not already present locally. Pass a *.yaml (e.g. yolov8l.yaml) instead to
+# train FROM SCRATCH with random init.
+DEFAULT_MODEL = "yolov8l.pt"
+DEFAULT_DATASET_ROOT = "./datasets/yolo_run"
 
 
 def is_scratch_model(spec: str) -> bool:
@@ -89,7 +112,7 @@ def is_scratch_model(spec: str) -> bool:
     rather than a .pt/.pth checkpoint with trained weights.
 
     Examples (True):  yolov8l.yaml, yolov8.yaml, yolo11l.yaml, yolov8l
-    Examples (False): best.pt, runs/train/exp/weights/best.pt, /path/to/weights.pt
+    Examples (False): best.pt, runs/train/exp/weights/best.pt, /path/to/weights.pt, yolov8l.pt
     """
     s = str(spec).strip()
     if s.lower().endswith((".yaml", ".yml")):
@@ -770,7 +793,7 @@ def plot_yolo_samples_matplotlib(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="YOLO training: train YOLOv8-L from scratch (default) or fine-tune a .pt on YOLO txt labels (with full augmentation control + matplotlib preview)",
+        description="YOLO training: fine-tune a pretrained YOLOv8-L (default) or train from scratch on YOLO txt labels (with full augmentation control + matplotlib preview)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog=(
             "Augmentation overrides examples:\n"
@@ -790,8 +813,9 @@ def build_parser() -> argparse.ArgumentParser:
     # --- Data / Model ---
     g_data = p.add_argument_group("Data / Model")
     g_data.add_argument("--model", type=str, default=DEFAULT_MODEL,
-                        help="Model to train. Default 'yolov8l.yaml' = YOLOv8-L trained FROM SCRATCH (random weights). "
-                             "Pass a .pt (e.g. best.pt / yolov8l.pt) to fine-tune instead.")
+                        help="Model to train. Default 'yolov8l.pt' = YOLOv8-L FINE-TUNED from COCO-pretrained "
+                             "weights (downloaded automatically by Ultralytics if not present). "
+                             "Pass a '*.yaml' (e.g. yolov8l.yaml) to train FROM SCRATCH with random init instead.")
     g_data.add_argument("--data-dir", type=str, default=DEFAULT_DATA_DIR,
                         help="Flat folder containing images + paired .txt YOLO labels (spaces in names OK). Ignored if --data-yaml is given and --no-prepare.")
     g_data.add_argument("--data-yaml", type=str, default=None,
@@ -911,6 +935,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- Misc ---
     g_misc = p.add_argument_group("Misc")
+    g_misc.add_argument("--gui", action="store_true",
+                        help="Launch a graphical UI (tkinter) to select dataset path, model, and all training parameters.")
     g_misc.add_argument("--dry-run", action="store_true",
                         help="Only prepare dataset + print the YOLO train() kwargs, do NOT start training.")
     g_misc.add_argument("--check-only", action="store_true",
@@ -989,27 +1015,658 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    if getattr(args, "gui", False):
+        launch_gui()
+        return
+
+    # Shared path used by both CLI and GUI
+    _execute_training(args)
+
+# ---------------------------------------------------------------------------
+# GUI (tkinter) — select dataset path, model, and training parameters
+# ---------------------------------------------------------------------------
+
+def launch_gui():
+    """Launch a tabbed tkinter UI for configuring and running YOLO training."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox, scrolledtext
+    except ImportError:
+        print(
+            "[ERROR] tkinter is not available in this Python environment.\n"
+            "  On Debian/Ubuntu:  sudo apt install python3-tk\n"
+            "  On Fedora:         sudo dnf install python3-tkinter\n"
+            "  On Windows/macOS:  use the official Python installer (includes tkinter).\n"
+            "Alternatively run without --gui and pass CLI flags.",
+            file=sys.stderr,
+        )
+        sys.exit(6)
+
+    # Redirect stdout/stderr into the log widget while a job runs.
+    # Must be robust on Windows where the default console encoding is often
+    # cp1252/"charmap" and Ultralytics prints UTF-8 / ANSI / special dashes.
+    class _TextRedirector:
+        def __init__(self, widget, tag="stdout"):
+            self.widget = widget
+            self.tag = tag
+            self.encoding = "utf-8"
+            self.errors = "replace"
+
+        def write(self, text):
+            if text is None:
+                return
+            # Accept str or bytes; never raise on bad code points
+            if isinstance(text, bytes):
+                try:
+                    text = text.decode(self.encoding, errors=self.errors)
+                except Exception:
+                    text = text.decode("latin-1", errors="replace")
+            else:
+                text = str(text)
+            # Strip common ANSI color codes so the log stays readable
+            try:
+                import re
+                text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+            except Exception:
+                pass
+            # Replace characters that break some Windows font/codepage setups
+            try:
+                text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+            except Exception:
+                text = "".join(ch if ord(ch) < 0x10000 else "?" for ch in text)
+
+            if not text:
+                return
+
+            def _append(t=text, tag=self.tag):
+                try:
+                    self.widget.configure(state="normal")
+                    self.widget.insert("end", t, (tag,))
+                    self.widget.see("end")
+                    self.widget.configure(state="disabled")
+                except Exception:
+                    pass
+
+            try:
+                self.widget.after(0, _append)
+            except Exception:
+                pass
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+        def fileno(self):
+            # Some libraries probe fileno(); raise so they treat us as non-tty
+            raise OSError("no fileno for GUI log redirector")
+
+    root = tk.Tk()
+    root.title("YOLO Training — Configure & Run")
+    root.geometry("920x720")
+    root.minsize(780, 560)
+
+    style = ttk.Style()
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    # State for optional numeric fields (None = use Ultralytics default)
+    vars_str = {}
+    vars_bool = {}
+    vars_float = {}
+    vars_int = {}
+
+    def _entry(parent, textvariable, width=12):
+        e = ttk.Entry(parent, textvariable=textvariable, width=width)
+        return e
+
+    def _browse_dir(var):
+        p = filedialog.askdirectory(title="Select folder")
+        if p:
+            var.set(p)
+
+    def _browse_file(var, patterns=None):
+        patterns = patterns or [("All files", "*.*")]
+        p = filedialog.askopenfilename(title="Select file", filetypes=patterns)
+        if p:
+            var.set(p)
+
+    # ---------- notebook ----------
+    nb = ttk.Notebook(root)
+    nb.pack(fill="both", expand=True, padx=8, pady=6)
+
+    # ===== Tab 1: Data / Model =====
+    tab_data = ttk.Frame(nb, padding=10)
+    nb.add(tab_data, text="  Data / Model  ")
+
+    row = 0
+    ttk.Label(tab_data, text="Model (.pt = fine-tune pretrained [default], .yaml = train from scratch)", font=("", 9, "bold")).grid(
+        row=row, column=0, sticky="w", pady=(0, 2)
+    )
+    row += 1
+    model_var = tk.StringVar(value=DEFAULT_MODEL)
+    f = ttk.Frame(tab_data)
+    f.grid(row=row, column=0, columnspan=3, sticky="ew", pady=2)
+    _entry(f, model_var, width=70).pack(side="left", fill="x", expand=True)
+    ttk.Button(f, text="Browse .pt…", command=lambda: _browse_file(
+        model_var, [("PyTorch weights", "*.pt *.pth"), ("YAML config", "*.yaml *.yml"), ("All", "*.*")]
+    )).pack(side="left", padx=4)
+    row += 1
+
+    ttk.Label(tab_data, text="Data directory (flat: images + co-located .txt labels)", font=("", 9, "bold")).grid(
+        row=row, column=0, sticky="w", pady=(12, 2)
+    )
+    row += 1
+    data_dir_var = tk.StringVar(value=DEFAULT_DATA_DIR)
+    f = ttk.Frame(tab_data)
+    f.grid(row=row, column=0, columnspan=3, sticky="ew", pady=2)
+    _entry(f, data_dir_var, width=70).pack(side="left", fill="x", expand=True)
+    ttk.Button(f, text="Browse…", command=lambda: _browse_dir(data_dir_var)).pack(side="left", padx=4)
+    row += 1
+
+    ttk.Label(tab_data, text="Dataset root (prepared YOLO layout will be written here)", font=("", 9, "bold")).grid(
+        row=row, column=0, sticky="w", pady=(12, 2)
+    )
+    row += 1
+    dataset_root_var = tk.StringVar(value=DEFAULT_DATASET_ROOT)
+    f = ttk.Frame(tab_data)
+    f.grid(row=row, column=0, columnspan=3, sticky="ew", pady=2)
+    _entry(f, dataset_root_var, width=70).pack(side="left", fill="x", expand=True)
+    ttk.Button(f, text="Browse…", command=lambda: _browse_dir(dataset_root_var)).pack(side="left", padx=4)
+    row += 1
+
+    ttk.Label(tab_data, text="Existing dataset.yaml (optional — skips auto-prepare if set)", font=("", 9, "bold")).grid(
+        row=row, column=0, sticky="w", pady=(12, 2)
+    )
+    row += 1
+    data_yaml_var = tk.StringVar(value="")
+    f = ttk.Frame(tab_data)
+    f.grid(row=row, column=0, columnspan=3, sticky="ew", pady=2)
+    _entry(f, data_yaml_var, width=70).pack(side="left", fill="x", expand=True)
+    ttk.Button(f, text="Browse…", command=lambda: _browse_file(
+        data_yaml_var, [("YAML", "*.yaml *.yml"), ("All", "*.*")]
+    )).pack(side="left", padx=4)
+    row += 1
+
+    opts = ttk.LabelFrame(tab_data, text="Dataset options", padding=8)
+    opts.grid(row=row, column=0, columnspan=3, sticky="ew", pady=12)
+    val_split_var = tk.DoubleVar(value=0.2)
+    seed_var = tk.IntVar(value=0)
+    single_cls_var = tk.BooleanVar(value=False)
+    force_prepare_var = tk.BooleanVar(value=False)
+    clean_var = tk.BooleanVar(value=False)
+    symlink_var = tk.BooleanVar(value=False)
+    no_prepare_var = tk.BooleanVar(value=False)
+
+    ttk.Label(opts, text="Val split (0–1):").grid(row=0, column=0, sticky="w")
+    ttk.Spinbox(opts, from_=0.0, to=0.9, increment=0.05, textvariable=val_split_var, width=8).grid(row=0, column=1, sticky="w", padx=4)
+    ttk.Label(opts, text="Seed:").grid(row=0, column=2, sticky="w", padx=(16, 0))
+    ttk.Spinbox(opts, from_=0, to=99999, textvariable=seed_var, width=8).grid(row=0, column=3, sticky="w", padx=4)
+    ttk.Checkbutton(opts, text="Single class", variable=single_cls_var).grid(row=1, column=0, sticky="w", pady=4)
+    ttk.Checkbutton(opts, text="Force re-prepare", variable=force_prepare_var).grid(row=1, column=1, sticky="w")
+    ttk.Checkbutton(opts, text="Clean dataset root", variable=clean_var).grid(row=1, column=2, sticky="w")
+    ttk.Checkbutton(opts, text="Use symlinks", variable=symlink_var).grid(row=1, column=3, sticky="w")
+    ttk.Checkbutton(opts, text="Skip prepare (--no-prepare)", variable=no_prepare_var).grid(row=2, column=0, columnspan=2, sticky="w")
+
+    tab_data.columnconfigure(0, weight=1)
+
+    # ===== Tab 2: Training =====
+    tab_train = ttk.Frame(nb, padding=10)
+    nb.add(tab_train, text="  Training  ")
+
+    train_frame = ttk.LabelFrame(tab_train, text="Core training", padding=8)
+    train_frame.pack(fill="x", pady=4)
+
+    epochs_var = tk.IntVar(value=100)
+    imgsz_var = tk.IntVar(value=640)
+    batch_var = tk.IntVar(value=8)
+    workers_var = tk.IntVar(value=8)
+    patience_var = tk.IntVar(value=50)
+    device_var = tk.StringVar(value="")
+    project_var = tk.StringVar(value="runs/train")
+    name_var = tk.StringVar(value="")
+    optimizer_var = tk.StringVar(value="auto")
+    cache_var = tk.StringVar(value="False")
+
+    def _grid_label_spin(parent, r, c, label, var, from_=0, to=10000, width=10):
+        ttk.Label(parent, text=label).grid(row=r, column=c * 2, sticky="w", padx=(0, 4), pady=3)
+        ttk.Spinbox(parent, from_=from_, to=to, textvariable=var, width=width).grid(row=r, column=c * 2 + 1, sticky="w", pady=3)
+
+    _grid_label_spin(train_frame, 0, 0, "Epochs:", epochs_var, 1, 2000)
+    _grid_label_spin(train_frame, 0, 1, "Image size:", imgsz_var, 32, 2048)
+    _grid_label_spin(train_frame, 0, 2, "Batch:", batch_var, -1, 256)
+    _grid_label_spin(train_frame, 1, 0, "Workers:", workers_var, 0, 32)
+    _grid_label_spin(train_frame, 1, 1, "Patience:", patience_var, 0, 500)
+
+    ttk.Label(train_frame, text="Device:").grid(row=1, column=4, sticky="w", padx=(12, 4))
+    ttk.Entry(train_frame, textvariable=device_var, width=12).grid(row=1, column=5, sticky="w")
+    ttk.Label(train_frame, text="(e.g. 0  or  cpu)").grid(row=1, column=6, sticky="w", padx=4)
+
+    ttk.Label(train_frame, text="Project:").grid(row=2, column=0, sticky="w", pady=3)
+    ttk.Entry(train_frame, textvariable=project_var, width=18).grid(row=2, column=1, sticky="w")
+    ttk.Label(train_frame, text="Run name:").grid(row=2, column=2, sticky="w", padx=(8, 4))
+    ttk.Entry(train_frame, textvariable=name_var, width=14).grid(row=2, column=3, sticky="w")
+    ttk.Label(train_frame, text="Optimizer:").grid(row=2, column=4, sticky="w", padx=(8, 4))
+    ttk.Combobox(train_frame, textvariable=optimizer_var, values=["auto", "SGD", "Adam", "AdamW", "NAdam", "RAdam", "RMSProp"], width=10).grid(row=2, column=5, sticky="w")
+
+    ttk.Label(train_frame, text="Cache:").grid(row=3, column=0, sticky="w", pady=3)
+    ttk.Combobox(train_frame, textvariable=cache_var, values=["False", "True", "ram", "disk"], width=10).grid(row=3, column=1, sticky="w")
+
+    flags_frame = ttk.LabelFrame(tab_train, text="Flags", padding=8)
+    flags_frame.pack(fill="x", pady=8)
+    amp_var = tk.BooleanVar(value=True)
+    rect_var = tk.BooleanVar(value=False)
+    cos_lr_var = tk.BooleanVar(value=False)
+    do_val_var = tk.BooleanVar(value=True)
+    plots_var = tk.BooleanVar(value=True)
+    exist_ok_var = tk.BooleanVar(value=False)
+    deterministic_var = tk.BooleanVar(value=True)
+    profile_var = tk.BooleanVar(value=False)
+
+    for i, (txt, v) in enumerate([
+        ("AMP (mixed precision)", amp_var),
+        ("Rectangular training", rect_var),
+        ("Cosine LR", cos_lr_var),
+        ("Validate during train", do_val_var),
+        ("Save plots", plots_var),
+        ("Exist-ok (overwrite)", exist_ok_var),
+        ("Deterministic", deterministic_var),
+        ("Profile", profile_var),
+    ]):
+        ttk.Checkbutton(flags_frame, text=txt, variable=v).grid(row=i // 4, column=i % 4, sticky="w", padx=8, pady=2)
+
+    opt_frame = ttk.LabelFrame(tab_train, text="Optional hyperparameters (leave empty = Ultralytics default)", padding=8)
+    opt_frame.pack(fill="x", pady=4)
+
+    lr0_var = tk.StringVar(value="")
+    lrf_var = tk.StringVar(value="")
+    momentum_var = tk.StringVar(value="")
+    weight_decay_var = tk.StringVar(value="")
+    warmup_epochs_var = tk.StringVar(value="")
+    close_mosaic_var = tk.StringVar(value="")
+    multi_scale_var = tk.StringVar(value="")
+    dropout_var = tk.StringVar(value="")
+    fraction_var = tk.StringVar(value="")
+    freeze_var = tk.StringVar(value="")
+    save_period_var = tk.StringVar(value="-1")
+    resume_var = tk.StringVar(value="")
+
+    opt_fields = [
+        ("lr0", lr0_var), ("lrf", lrf_var), ("momentum", momentum_var),
+        ("weight_decay", weight_decay_var), ("warmup_epochs", warmup_epochs_var),
+        ("close_mosaic", close_mosaic_var), ("multi_scale", multi_scale_var),
+        ("dropout", dropout_var), ("fraction", fraction_var), ("freeze", freeze_var),
+        ("save_period", save_period_var), ("resume", resume_var),
+    ]
+    for i, (lab, var) in enumerate(opt_fields):
+        r, c = divmod(i, 4)
+        ttk.Label(opt_frame, text=lab + ":").grid(row=r, column=c * 2, sticky="w", padx=(4, 2), pady=2)
+        ttk.Entry(opt_frame, textvariable=var, width=10).grid(row=r, column=c * 2 + 1, sticky="w", pady=2)
+
+    # ===== Tab 3: Augmentation =====
+    tab_aug = ttk.Frame(nb, padding=10)
+    nb.add(tab_aug, text="  Augmentation  ")
+
+    preset_frame = ttk.Frame(tab_aug)
+    preset_frame.pack(fill="x", pady=4)
+    ttk.Label(preset_frame, text="Preset:").pack(side="left")
+    aug_preset_var = tk.StringVar(value="")
+    ttk.Combobox(
+        preset_frame, textvariable=aug_preset_var, width=12,
+        values=["", "none", "light", "medium", "heavy"],
+        state="readonly",
+    ).pack(side="left", padx=6)
+    ttk.Label(preset_frame, text="(empty = Ultralytics defaults; explicit fields below override preset)").pack(side="left")
+
+    aug_frame = ttk.LabelFrame(tab_aug, text="Overrides (leave empty to keep default / preset)", padding=8)
+    aug_frame.pack(fill="both", expand=True, pady=8)
+
+    aug_vars = {}
+    aug_labels = [
+        ("hsv_h", "HSV Hue"), ("hsv_s", "HSV Saturation"), ("hsv_v", "HSV Value"),
+        ("degrees", "Rotation °"), ("translate", "Translate"), ("scale", "Scale"),
+        ("shear", "Shear °"), ("perspective", "Perspective"), ("flipud", "Flip UD"),
+        ("fliplr", "Flip LR"), ("bgr", "BGR shuffle"), ("mosaic", "Mosaic"),
+        ("mixup", "Mixup"), ("cutmix", "CutMix"), ("copy_paste", "Copy-paste"),
+        ("erasing", "Random erase"),
+    ]
+    for i, (key, lab) in enumerate(aug_labels):
+        r, c = divmod(i, 4)
+        ttk.Label(aug_frame, text=lab + ":").grid(row=r, column=c * 2, sticky="w", padx=(6, 2), pady=3)
+        v = tk.StringVar(value="")
+        aug_vars[key] = v
+        ttk.Entry(aug_frame, textvariable=v, width=9).grid(row=r, column=c * 2 + 1, sticky="w", pady=3)
+
+    ttk.Label(aug_frame, text="copy_paste_mode:").grid(row=4, column=0, sticky="w", padx=(6, 2), pady=3)
+    copy_paste_mode_var = tk.StringVar(value="")
+    ttk.Combobox(aug_frame, textvariable=copy_paste_mode_var, values=["", "flip", "mixup"], width=8, state="readonly").grid(row=4, column=1, sticky="w")
+    ttk.Label(aug_frame, text="auto_augment:").grid(row=4, column=2, sticky="w", padx=(6, 2))
+    auto_augment_var = tk.StringVar(value="")
+    ttk.Combobox(aug_frame, textvariable=auto_augment_var, values=["", "randaugment", "autoaugment", "augmix"], width=12, state="readonly").grid(row=4, column=3, sticky="w")
+
+    # ===== Tab 4: Preview & Run =====
+    tab_run = ttk.Frame(nb, padding=10)
+    nb.add(tab_run, text="  Preview / Run  ")
+
+    plot_frame = ttk.LabelFrame(tab_run, text="Matplotlib preview (before training)", padding=8)
+    plot_frame.pack(fill="x", pady=4)
+
+    plot_var = tk.BooleanVar(value=False)
+    plot_only_var = tk.BooleanVar(value=False)
+    plot_n_var = tk.IntVar(value=6)
+    plot_split_var = tk.StringVar(value="train")
+    plot_save_var = tk.StringVar(value="")
+    plot_show_var = tk.BooleanVar(value=False)
+    plot_seed_var = tk.IntVar(value=0)
+    plot_max_boxes_var = tk.StringVar(value="")
+    plot_dpi_var = tk.IntVar(value=150)
+
+    ttk.Checkbutton(plot_frame, text="Plot samples before train", variable=plot_var).grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(plot_frame, text="Plot only (no training)", variable=plot_only_var).grid(row=0, column=1, sticky="w")
+    ttk.Checkbutton(plot_frame, text="Show window", variable=plot_show_var).grid(row=0, column=2, sticky="w")
+
+    ttk.Label(plot_frame, text="N samples:").grid(row=1, column=0, sticky="w", pady=4)
+    ttk.Spinbox(plot_frame, from_=1, to=36, textvariable=plot_n_var, width=6).grid(row=1, column=0, sticky="e")
+    ttk.Label(plot_frame, text="Split:").grid(row=1, column=1, sticky="w")
+    ttk.Combobox(plot_frame, textvariable=plot_split_var, values=["train", "val", "all"], width=8, state="readonly").grid(row=1, column=1, sticky="e")
+    ttk.Label(plot_frame, text="DPI:").grid(row=1, column=2, sticky="w")
+    ttk.Spinbox(plot_frame, from_=72, to=300, textvariable=plot_dpi_var, width=6).grid(row=1, column=2, sticky="e")
+
+    ttk.Label(plot_frame, text="Save path (optional):").grid(row=2, column=0, sticky="w", pady=4)
+    f = ttk.Frame(plot_frame)
+    f.grid(row=2, column=1, columnspan=2, sticky="ew")
+    ttk.Entry(f, textvariable=plot_save_var, width=40).pack(side="left", fill="x", expand=True)
+    ttk.Button(f, text="…", width=3, command=lambda: _browse_file(
+        plot_save_var, [("PNG", "*.png"), ("All", "*.*")]
+    ) if False else plot_save_var.set(filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png")]) or plot_save_var.get())).pack(side="left", padx=2)
+
+    ttk.Label(plot_frame, text="Max boxes / image (empty=all):").grid(row=3, column=0, sticky="w")
+    ttk.Entry(plot_frame, textvariable=plot_max_boxes_var, width=8).grid(row=3, column=1, sticky="w")
+    ttk.Label(plot_frame, text="Plot seed:").grid(row=3, column=2, sticky="w")
+    ttk.Spinbox(plot_frame, from_=0, to=99999, textvariable=plot_seed_var, width=8).grid(row=3, column=2, sticky="e")
+
+    run_opts = ttk.Frame(tab_run)
+    run_opts.pack(fill="x", pady=10)
+    dry_run_var = tk.BooleanVar(value=False)
+    check_only_var = tk.BooleanVar(value=False)
+    verbose_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(run_opts, text="Dry-run (prepare + show config, no train)", variable=dry_run_var).pack(side="left", padx=8)
+    ttk.Checkbutton(run_opts, text="Check-only", variable=check_only_var).pack(side="left", padx=8)
+    ttk.Checkbutton(run_opts, text="Verbose", variable=verbose_var).pack(side="left", padx=8)
+
+    # Log area
+    log_frame = ttk.LabelFrame(tab_run, text="Log", padding=4)
+    log_frame.pack(fill="both", expand=True, pady=4)
+    log_text = scrolledtext.ScrolledText(log_frame, height=14, state="disabled", wrap="word", font=("Consolas", 9))
+    log_text.pack(fill="both", expand=True)
+    log_text.tag_configure("stdout", foreground="#111")
+    log_text.tag_configure("stderr", foreground="#a00")
+
+    # ---------- bottom action bar ----------
+    bar = ttk.Frame(root, padding=(8, 4))
+    bar.pack(fill="x")
+
+    status_var = tk.StringVar(value="Ready")
+    ttk.Label(bar, textvariable=status_var, foreground="#333").pack(side="left")
+
+    btn_frame = ttk.Frame(bar)
+    btn_frame.pack(side="right")
+
+    running = {"flag": False}
+
+    def _parse_optional_float(s):
+        s = (s or "").strip()
+        if not s:
+            return None
+        return float(s)
+
+    def _parse_optional_int(s):
+        s = (s or "").strip()
+        if not s:
+            return None
+        return int(s)
+
+    def build_namespace():
+        """Build an argparse.Namespace from GUI state (same shape as CLI)."""
+        ns = argparse.Namespace()
+        # Data / model
+        ns.model = model_var.get().strip() or DEFAULT_MODEL
+        ns.data_dir = data_dir_var.get().strip() or DEFAULT_DATA_DIR
+        ns.dataset_root = dataset_root_var.get().strip() or DEFAULT_DATASET_ROOT
+        dy = data_yaml_var.get().strip()
+        ns.data_yaml = dy if dy else None
+        ns.val_split = float(val_split_var.get())
+        ns.seed = int(seed_var.get())
+        ns.single_cls = bool(single_cls_var.get())
+        ns.force_prepare = bool(force_prepare_var.get())
+        ns.clean = bool(clean_var.get())
+        ns.symlink = bool(symlink_var.get())
+        ns.no_prepare = bool(no_prepare_var.get())
+        # Training
+        ns.epochs = int(epochs_var.get())
+        ns.imgsz = int(imgsz_var.get())
+        ns.batch = int(batch_var.get())
+        ns.workers = int(workers_var.get())
+        ns.device = device_var.get().strip() or None
+        ns.project = project_var.get().strip() or "runs/train"
+        ns.name = name_var.get().strip() or None
+        ns.exist_ok = bool(exist_ok_var.get())
+        ns.patience = int(patience_var.get())
+        ns.save_period = _parse_optional_int(save_period_var.get())
+        if ns.save_period is None:
+            ns.save_period = -1
+        ns.cache = cache_var.get().strip() or "False"
+        ns.rect = bool(rect_var.get())
+        ns.resume = resume_var.get().strip() or None
+        ns.freeze = freeze_var.get().strip() or None
+        ns.amp = bool(amp_var.get())
+        ns.optimizer = optimizer_var.get().strip() or "auto"
+        ns.lr0 = _parse_optional_float(lr0_var.get())
+        ns.lrf = _parse_optional_float(lrf_var.get())
+        ns.momentum = _parse_optional_float(momentum_var.get())
+        ns.weight_decay = _parse_optional_float(weight_decay_var.get())
+        ns.warmup_epochs = _parse_optional_float(warmup_epochs_var.get())
+        ns.close_mosaic = _parse_optional_int(close_mosaic_var.get())
+        ns.multi_scale = _parse_optional_float(multi_scale_var.get())
+        ns.cos_lr = bool(cos_lr_var.get())
+        ns.dropout = _parse_optional_float(dropout_var.get())
+        ns.do_val = bool(do_val_var.get())
+        ns.plots = bool(plots_var.get())
+        ns.fraction = _parse_optional_float(fraction_var.get())
+        ns.profile = bool(profile_var.get())
+        ns.deterministic = bool(deterministic_var.get())
+        # Augmentation
+        ns.aug_preset = aug_preset_var.get().strip() or None
+        for key, var in aug_vars.items():
+            setattr(ns, key, _parse_optional_float(var.get()))
+        ns.copy_paste = _parse_optional_float(aug_vars.get("copy_paste", tk.StringVar()).get()) if "copy_paste" in aug_vars else None
+        # fix: already set via loop for copy_paste if in aug_vars
+        ns.copy_paste_mode = copy_paste_mode_var.get().strip() or None
+        ns.auto_augment = auto_augment_var.get().strip() or None
+        # map hsv etc already done; ensure dest names match argparse
+        ns.hsv_h = _parse_optional_float(aug_vars["hsv_h"].get())
+        ns.hsv_s = _parse_optional_float(aug_vars["hsv_s"].get())
+        ns.hsv_v = _parse_optional_float(aug_vars["hsv_v"].get())
+        ns.degrees = _parse_optional_float(aug_vars["degrees"].get())
+        ns.translate = _parse_optional_float(aug_vars["translate"].get())
+        ns.scale = _parse_optional_float(aug_vars["scale"].get())
+        ns.shear = _parse_optional_float(aug_vars["shear"].get())
+        ns.perspective = _parse_optional_float(aug_vars["perspective"].get())
+        ns.flipud = _parse_optional_float(aug_vars["flipud"].get())
+        ns.fliplr = _parse_optional_float(aug_vars["fliplr"].get())
+        ns.bgr = _parse_optional_float(aug_vars["bgr"].get())
+        ns.mosaic = _parse_optional_float(aug_vars["mosaic"].get())
+        ns.mixup = _parse_optional_float(aug_vars["mixup"].get())
+        ns.cutmix = _parse_optional_float(aug_vars["cutmix"].get())
+        ns.erasing = _parse_optional_float(aug_vars["erasing"].get())
+        # Preview
+        ns.plot = bool(plot_var.get()) or bool(plot_only_var.get())
+        ns.plot_only = bool(plot_only_var.get())
+        ns.plot_n = int(plot_n_var.get())
+        ns.plot_split = plot_split_var.get()
+        ns.plot_save = plot_save_var.get().strip() or None
+        ns.plot_show = bool(plot_show_var.get())
+        ns.plot_seed = int(plot_seed_var.get())
+        ns.plot_max_boxes = _parse_optional_int(plot_max_boxes_var.get())
+        ns.plot_dpi = int(plot_dpi_var.get())
+        # Misc
+        ns.gui = False
+        ns.dry_run = bool(dry_run_var.get())
+        ns.check_only = bool(check_only_var.get())
+        ns.verbose = bool(verbose_var.get())
+        return ns
+
+    def _set_buttons(enabled: bool):
+        for b in (btn_train, btn_dry, btn_plot, btn_check):
+            b.configure(state="normal" if enabled else "disabled")
+
+    def _run_job(mode: str):
+        if running["flag"]:
+            messagebox.showwarning("Busy", "A job is already running.")
+            return
+        try:
+            args = build_namespace()
+        except Exception as e:
+            messagebox.showerror("Invalid parameters", str(e))
+            return
+
+        if mode == "dry":
+            args.dry_run = True
+            args.plot_only = False
+            args.check_only = False
+        elif mode == "plot":
+            args.plot = True
+            args.plot_only = True
+            args.dry_run = False
+            args.check_only = False
+        elif mode == "check":
+            args.check_only = True
+            args.dry_run = False
+            args.plot_only = False
+        elif mode == "train":
+            args.dry_run = False
+            args.check_only = False
+            # plot_only left as user set
+
+        # Clear log
+        log_text.configure(state="normal")
+        log_text.delete("1.0", "end")
+        log_text.configure(state="disabled")
+
+        running["flag"] = True
+        _set_buttons(False)
+        status_var.set(f"Running ({mode})...")
+
+        old_out, old_err = sys.stdout, sys.stderr
+        # Prefer UTF-8 for any library that still writes to the real console
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                if hasattr(stream, "reconfigure"):
+                    stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+        sys.stdout = _TextRedirector(log_text, "stdout")
+        sys.stderr = _TextRedirector(log_text, "stderr")
+
+        def worker():
+            exit_code = 0
+            # Force UTF-8 in this thread so child libs don't use cp1252
+            import os
+            os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+            try:
+                # Re-use the same code path as CLI by calling main logic with our Namespace.
+                # We temporarily patch sys.argv so resolve_augmentation_args sees explicit keys.
+                explicit_flags = []
+                for k in ["hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear",
+                          "perspective", "flipud", "fliplr", "bgr", "mosaic", "mixup", "cutmix",
+                          "copy_paste", "erasing"]:
+                    if getattr(args, k, None) is not None:
+                        explicit_flags.append(f"--{k.replace('_', '-')}")
+                if args.aug_preset:
+                    explicit_flags.append("--aug-preset")
+                if args.copy_paste_mode:
+                    explicit_flags.append("--copy-paste-mode")
+                if args.auto_augment is not None:
+                    explicit_flags.append("--auto-augment")
+                old_argv = sys.argv
+                sys.argv = [old_argv[0]] + explicit_flags
+                try:
+                    _execute_training(args)
+                finally:
+                    sys.argv = old_argv
+            except SystemExit as se:
+                try:
+                    exit_code = int(se.code) if se.code is not None else 0
+                except Exception:
+                    exit_code = 1
+            except Exception as e:
+                try:
+                    print(f"[GUI] Unhandled error: {e}", file=sys.stderr)
+                    import traceback
+                    traceback.print_exc()
+                except Exception:
+                    pass
+                exit_code = 1
+            finally:
+                sys.stdout = old_out
+                sys.stderr = old_err
+
+                def _done():
+                    running["flag"] = False
+                    _set_buttons(True)
+                    if exit_code == 0:
+                        status_var.set(f"Finished ({mode}) OK")
+                    else:
+                        status_var.set(f"Finished ({mode}) with exit {exit_code}")
+                try:
+                    root.after(0, _done)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    btn_check = ttk.Button(btn_frame, text="Check only", command=lambda: _run_job("check"))
+    btn_check.pack(side="left", padx=3)
+    btn_plot = ttk.Button(btn_frame, text="Plot only", command=lambda: _run_job("plot"))
+    btn_plot.pack(side="left", padx=3)
+    btn_dry = ttk.Button(btn_frame, text="Dry-run", command=lambda: _run_job("dry"))
+    btn_dry.pack(side="left", padx=3)
+    btn_train = ttk.Button(btn_frame, text="▶  Start training", command=lambda: _run_job("train"))
+    btn_train.pack(side="left", padx=3)
+
+    ttk.Button(btn_frame, text="Quit", command=root.destroy).pack(side="left", padx=(12, 0))
+
+    root.mainloop()
+
+
+def _execute_training(args):
+    """
+    Core entry used by both CLI main() and the GUI.
+    Mirrors the body of main() after argparse (dataset prep → plot → train).
+    """
     print("=" * 78)
-    print(" YOLO Train — yolov8l from scratch (pass a .pt to fine-tune instead)")
+    print(" YOLO Train - fine-tune pretrained by default (pass a *.yaml to train from scratch)")
     print("=" * 78)
     print(f"  Model      : {args.model}")
-    print(f"  Mode       : {'FROM SCRATCH (random init, architecture from yaml)' if is_scratch_model(args.model) else 'fine-tune / continue from checkpoint'}")
+    print(f"  Mode       : {'FROM SCRATCH (random init, architecture from yaml)' if is_scratch_model(args.model) else 'fine-tune / continue from pretrained checkpoint'}")
     print(f"  Data dir   : {args.data_dir}")
     print(f"  DatasetRoot: {args.dataset_root}")
     print(f"  Data YAML  : {args.data_yaml if args.data_yaml else '(auto-generated)'}")
     print()
 
-    # ---- checks ----
     model_path = Path(args.model)
     from_scratch = is_scratch_model(args.model)
     if not from_scratch and not model_path.exists():
-        print(f"[ERROR] Model not found: {model_path} (cwd={Path.cwd()})")
-        alt = Path(DEFAULT_MODEL)
-        if alt.exists():
-            print(f"        Hint: default model exists at {alt.resolve()}")
-        sys.exit(2)
+        # Not a local file — Ultralytics will auto-download known pretrained
+        # checkpoints (e.g. yolov8l.pt) from its release assets on first use.
+        print(f"[INFO] '{model_path}' not found locally; Ultralytics will attempt to auto-download the pretrained checkpoint.")
     if from_scratch:
         print(f"[INFO] Training FROM SCRATCH: {args.model} (random init, no pretrained weights)")
+    else:
+        print(f"[INFO] Fine-tuning from PRETRAINED weights: {args.model}")
 
     data_yaml_path: Optional[Path] = None
     if args.data_yaml:
@@ -1023,14 +1680,11 @@ def main():
             elif args.force_prepare:
                 print(f"[INFO] --force-prepare set, will regenerate dataset despite --data-yaml")
 
-    # ---- dataset preparation ----
     if data_yaml_path is None and not args.no_prepare:
         try:
             data_dir = Path(args.data_dir)
             dataset_root = Path(args.dataset_root)
             if from_scratch:
-                # A yaml-built model has no trained class names (defaults to nc=80),
-                # so derive nc/names from the labels instead.
                 nc, names = -1, []
             else:
                 nc, names = get_model_info(str(model_path))
@@ -1054,7 +1708,7 @@ def main():
                 for txt in lbl_dir.glob("*.txt"):
                     try:
                         for line in txt.read_text(errors="ignore").splitlines():
-                            line=line.strip()
+                            line = line.strip()
                             if line:
                                 max_cls_prepared = max(max_cls_prepared, int(float(line.split()[0])))
                     except Exception:
@@ -1072,8 +1726,9 @@ def main():
             print(f"[INFO] Prepared dataset: train={ntrain} val={nval} -> {prepared_root.resolve()}")
         except Exception as e:
             print(f"[ERROR] Dataset preparation failed: {e}", file=sys.stderr)
-            import traceback; traceback.print_exc()
-            sys.exit(3)
+            import traceback
+            traceback.print_exc()
+            raise SystemExit(3)
     elif args.no_prepare:
         if args.data_yaml and Path(args.data_yaml).exists():
             data_yaml_path = Path(args.data_yaml).resolve()
@@ -1085,38 +1740,26 @@ def main():
             else:
                 print(f"[ERROR] --no-prepare set but no dataset.yaml found at {cand.resolve()} nor --data-yaml. "
                       f"Provide --data-yaml or remove --no-prepare.", file=sys.stderr)
-                sys.exit(2)
-    else:
-        pass
+                raise SystemExit(2)
 
     if args.check_only:
         print("[INFO] --check-only: dataset and model validated, exiting.")
         print(f"       dataset yaml = {data_yaml_path}")
-        print(f"       model        = {args.model}{' (from scratch)' if from_scratch else ''}")
-        sys.exit(0)
+        print(f"       model        = {args.model}{' (from scratch)' if from_scratch else ' (pretrained fine-tune)'}")
+        raise SystemExit(0)
 
     if data_yaml_path is None or not data_yaml_path.exists():
         print(f"[ERROR] No dataset YAML available. Expected {data_yaml_path}", file=sys.stderr)
-        sys.exit(3)
+        raise SystemExit(3)
 
-    # -------------------------------------------------------------------
-    # NEW STEP: Plot a few images with GT boxes BEFORE training (matplotlib)
-    # -------------------------------------------------------------------
-    # This is the requested "implot matplotlib" sanity check — verifies
-    # that YOLO txt -> image alignment is correct before spending GPU hours.
     do_plot = args.plot or args.plot_only
     if do_plot:
         print()
         print("=" * 78)
-        print(" Preview — plotting samples BEFORE training (matplotlib)")
+        print(" Preview - plotting samples BEFORE training (matplotlib)")
         print("=" * 78)
         try:
             dataset_root_hint = Path(args.dataset_root).resolve() if args.dataset_root else None
-            # If dataset was prepared just now, prefer that root; else fallback to hint
-            # Try to infer hint from yaml parent if yaml exists
-            if data_yaml_path and data_yaml_path.exists():
-                # prefer yaml parent as hint too
-                pass
             save_hint = Path(args.plot_save) if args.plot_save else None
             out = plot_yolo_samples_matplotlib(
                 yaml_path=data_yaml_path,
@@ -1131,20 +1774,19 @@ def main():
             )
             if out is not None:
                 print(f"[PLOT] Preview ready: {out}")
-                print(f"[PLOT] Open with:  xdg-open \"{out}\"  or  python -m http.server")
             else:
                 print("[PLOT][WARN] Preview not created (see warnings above)")
         except Exception as e:
             print(f"[PLOT][ERROR] Preview failed: {e}", file=sys.stderr)
-            import traceback; traceback.print_exc()
-            # don't abort training just because plot failed
+            import traceback
+            traceback.print_exc()
         print("=" * 78)
         print()
         if args.plot_only:
-            print("[PLOT-ONLY] Exiting after preview (no training started). Remove --plot-only to train.")
-            sys.exit(0)
+            print("[PLOT-ONLY] Exiting after preview (no training started).")
+            raise SystemExit(0)
 
-    # ---- build training kwargs ----
+    parser = build_parser()  # needed for resolve_augmentation_args signature
     aug_kwargs = resolve_augmentation_args(args, parser)
 
     train_kwargs: Dict = dict(
@@ -1220,28 +1862,23 @@ def main():
 
     print()
     print(f"  Dataset YAML : {data_yaml_path}")
-    print(f"  Model        : {args.model}{' (from scratch, random init)' if from_scratch else f' -> {model_path.resolve()}'}")
+    print(f"  Model        : {args.model}{' (from scratch, random init)' if from_scratch else ' (pretrained, fine-tuning)'}")
     print("=" * 78)
 
     if args.dry_run:
-        print("[DRY-RUN] Prepared dataset and printed config. NOT starting training (remove --dry-run to train).")
-        print(f"[DRY-RUN] To train, run:")
-        print(f"  python {Path(__file__).name} --model {model_path} --data-yaml {data_yaml_path} --epochs {args.epochs} --imgsz {args.imgsz} --batch {args.batch}")
-        if not do_plot:
-            print(f"  Tip: add --plot --plot-n 6  to preview samples before training")
-        sys.exit(0)
+        print("[DRY-RUN] Prepared dataset and printed config. NOT starting training.")
+        raise SystemExit(0)
 
-    # ---- start training ----
     try:
         from ultralytics import YOLO
     except ImportError:
         print("[ERROR] ultralytics not installed. Run: pip install ultralytics torch", file=sys.stderr)
-        sys.exit(4)
+        raise SystemExit(4)
 
     print()
     print(f"[INFO] Loading model: {args.model}"
-          + ("  (architecture only — weights randomly initialized, training FROM SCRATCH)"
-             if from_scratch else ""))
+          + ("  (architecture only - weights randomly initialized, training FROM SCRATCH)"
+             if from_scratch else "  (pretrained weights, downloading if not cached locally)"))
     model = YOLO(str(model_path))
 
     print(f"[INFO] Starting training for {args.epochs} epochs (imgsz={args.imgsz}, batch={args.batch}) ...")
@@ -1276,8 +1913,9 @@ def main():
         print("=" * 78)
     except Exception as e:
         print(f"[ERROR] Training failed: {e}", file=sys.stderr)
-        import traceback; traceback.print_exc()
-        sys.exit(5)
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(5)
 
 
 if __name__ == "__main__":
